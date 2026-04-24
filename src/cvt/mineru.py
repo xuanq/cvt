@@ -221,7 +221,9 @@ def convert_file(
 ) -> Path:
     token = token or os.getenv("MINERU_TOKEN")
     if not token:
-        raise ValueError("未提供 MinerU token，请传入 --mineru-token 或设置 MINERU_TOKEN。")
+        raise ValueError(
+            "未提供 MinerU token，请传入 --mineru-token 或设置 MINERU_TOKEN。"
+        )
 
     validate_file(file_path)
     data_id = data_id if data_id is not None else file_path.stem
@@ -292,15 +294,15 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--model-version",
-        default="pipeline",
+        default="vlm",
         choices=["pipeline", "vlm", "MinerU-HTML"],
-        help="模型版本，默认 pipeline",
+        help="模型版本，默认 vlm",
     )
     parser.add_argument(
         "--is-ocr",
         type=str2bool,
-        default=False,
-        help="是否开启 OCR，默认 false",
+        default=True,
+        help="是否开启 OCR，默认 True",
     )
     parser.add_argument(
         "--interval",

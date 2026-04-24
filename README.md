@@ -10,24 +10,35 @@ uv tool install .
 
 ## 配置
 
-CLI 会默认从当前目录向上查找 `.env`，也可以使用 `--env-file` 指定路径：
+安装后首次运行 CLI 会创建用户配置文件 `~/.cvt/config.toml`。推荐通过 CLI 写入 token：
 
-```env
-PADDLE_TOKEN=your-paddle-token
-MINERU_TOKEN=your-mineru-token
+```bash
+cvt config set --paddle-token "your-paddle-token"
+cvt config set --mineru-token "your-mineru-token"
+cvt config show
 ```
 
-Shell 环境变量和命令行参数同样支持：
+配置文件格式：
+
+```toml
+[paddle]
+token = "your-paddle-token"
+api_url = ""
+
+[mineru]
+token = "your-mineru-token"
+```
+
+Token 优先级为：命令行参数 > `~/.cvt/config.toml` > 环境变量。命令行参数和环境变量也支持：
 
 ```bash
 export PADDLE_TOKEN="your-paddle-token"
 export MINERU_TOKEN="your-mineru-token"
-```
-
-```bash
 cvt input.pdf --paddle-token "$PADDLE_TOKEN"
 cvt input.pdf --engine mineru --mineru-token "$MINERU_TOKEN"
 ```
+
+开发时仍可使用 `.env`，CLI 会默认从当前目录向上查找 `.env`，也可以用 `--env-file` 指定路径。
 
 ## 使用
 

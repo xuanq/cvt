@@ -10,8 +10,15 @@ import zipfile
 from pathlib import Path
 from typing import Any
 
-from . import mineru
-from . import paddle
+from . import mineru, paddle
+from .settings import (
+    CONFIG_PATH,
+    CvtSettings,
+    ensure_config_file,
+    load_settings,
+    mask_secret,
+    update_settings,
+)
 
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff"}
 MARKDOWN_EXTENSIONS = {".md", ".markdown"}
@@ -77,6 +84,35 @@ def _load_dotenv(path: Path) -> None:
         os.environ.setdefault(key, value)
 
 
+def _resolve_setting(
+    cli_value: str | None,
+    config_value: str | None,
+    env_name: str,
+) -> str | None:
+    for value in (cli_value, config_value, os.getenv(env_name)):
+        if value and value.strip():
+            return value
+    return None
+
+
+def _apply_settings(args: argparse.Namespace, settings: CvtSettings) -> None:
+    args.paddle_token = _resolve_setting(
+        args.paddle_token,
+        settings.paddle.token,
+        "PADDLE_TOKEN",
+    )
+    args.paddle_api_url = _resolve_setting(
+        args.paddle_api_url,
+        settings.paddle.api_url,
+        "PADDLE_API_URL",
+    )
+    args.mineru_token = _resolve_setting(
+        args.mineru_token,
+        settings.mineru.token,
+        "MINERU_TOKEN",
+    )
+
+
 def _infer_output_format(output: Path | None, requested: str | None) -> str:
     if requested:
         return requested
@@ -109,7 +145,9 @@ def _require_input(path: Path) -> None:
 
 def _run_pandoc(input_path: Path, output_path: Path, output_format: str) -> list[Path]:
     if shutil.which("pandoc") is None:
-        raise RuntimeError("未找到 pandoc。请先安装 pandoc，或为 PDF/图片输入选择 Paddle/MinerU。")
+        raise RuntimeError(
+            "未找到 pandoc。请先安装 pandoc，或为 PDF/图片输入选择 Paddle/MinerU。"
+        )
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     command = ["pandoc", str(input_path), "-o", str(output_path)]
@@ -249,7 +287,11 @@ def _convert_with_mineru(
     output_path: Path,
     output_format: str,
 ) -> list[Path]:
-    zip_path = output_path if output_format == "zip" else output_path.with_suffix(".mineru.zip")
+    zip_path = (
+        output_path
+        if output_format == "zip"
+        else output_path.with_suffix(".mineru.zip")
+    )
     downloaded_zip = mineru.convert_file(
         args.input,
         output_path=zip_path,
@@ -346,11 +388,19 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("input", type=Path, help="输入文件路径")
     parser.add_argument("-o", "--output", type=Path, help="输出文件路径")
-    parser.add_argument("-d", "--output-dir", type=Path, help="未指定 --output 时的输出目录")
+    parser.add_argument(
+        "-d", "--output-dir", type=Path, help="未指定 --output 时的输出目录"
+    )
     parser.add_argument(
         "--env-file",
         type=Path,
         help="加载指定 .env 文件；默认从当前目录向上查找 .env",
+    )
+    parser.add_argument(
+        "--config-file",
+        type=Path,
+        default=CONFIG_PATH,
+        help=f"配置文件路径，默认 {CONFIG_PATH}",
     )
     parser.add_argument(
         "--to",
@@ -372,10 +422,18 @@ def build_parser() -> argparse.ArgumentParser:
     parser.set_defaults(fallback=True)
 
     paddle_group = parser.add_argument_group("Paddle")
-    paddle_group.add_argument("--paddle-token", help="Paddle API token；默认读取 PADDLE_TOKEN")
-    paddle_group.add_argument("--paddle-api-url", help="Paddle API 地址；默认读取 PADDLE_API_URL 或内置地址")
-    paddle_group.add_argument("--paddle-timeout", type=int, default=600, help="Paddle 请求超时秒数")
-    paddle_group.add_argument("--split-pages", action="store_true", help="Paddle 输出 md 时同时保存分页 md")
+    paddle_group.add_argument(
+        "--paddle-token", help="Paddle API token；默认读取 PADDLE_TOKEN"
+    )
+    paddle_group.add_argument(
+        "--paddle-api-url", help="Paddle API 地址；默认读取 PADDLE_API_URL 或内置地址"
+    )
+    paddle_group.add_argument(
+        "--paddle-timeout", type=int, default=600, help="Paddle 请求超时秒数"
+    )
+    paddle_group.add_argument(
+        "--split-pages", action="store_true", help="Paddle 输出 md 时同时保存分页 md"
+    )
     paddle_group.add_argument(
         "--no-assets",
         dest="download_assets",
@@ -385,25 +443,147 @@ def build_parser() -> argparse.ArgumentParser:
     paddle_group.set_defaults(download_assets=True)
 
     mineru_group = parser.add_argument_group("MinerU")
-    mineru_group.add_argument("--mineru-token", help="MinerU token；默认读取 MINERU_TOKEN")
-    mineru_group.add_argument("--data-id", help="MinerU data_id；默认使用输入文件名主干")
-    mineru_group.add_argument("--enable-formula", type=mineru.str2bool, default=True, help="是否开启公式识别")
-    mineru_group.add_argument("--enable-table", type=mineru.str2bool, default=True, help="是否开启表格识别")
-    mineru_group.add_argument("--language", default="ch", help="MinerU 文档语言，默认 ch")
+    mineru_group.add_argument(
+        "--mineru-token", help="MinerU token；默认读取 MINERU_TOKEN"
+    )
+    mineru_group.add_argument(
+        "--data-id", help="MinerU data_id；默认使用输入文件名主干"
+    )
+    mineru_group.add_argument(
+        "--enable-formula", type=mineru.str2bool, default=True, help="是否开启公式识别"
+    )
+    mineru_group.add_argument(
+        "--enable-table", type=mineru.str2bool, default=True, help="是否开启表格识别"
+    )
+    mineru_group.add_argument(
+        "--language", default="ch", help="MinerU 文档语言，默认 ch"
+    )
     mineru_group.add_argument(
         "--model-version",
-        default="pipeline",
+        default="vlm",
         choices=["pipeline", "vlm", "MinerU-HTML"],
         help="MinerU 模型版本",
     )
-    mineru_group.add_argument("--is-ocr", type=mineru.str2bool, default=False, help="MinerU 是否开启 OCR")
-    mineru_group.add_argument("--interval", type=int, default=mineru.DEFAULT_POLL_INTERVAL, help="MinerU 轮询间隔秒数")
-    mineru_group.add_argument("--timeout", type=int, default=mineru.DEFAULT_TIMEOUT_SECONDS, help="MinerU 最长等待秒数")
+    mineru_group.add_argument(
+        "--is-ocr", type=mineru.str2bool, default=True, help="MinerU 是否开启 OCR"
+    )
+    mineru_group.add_argument(
+        "--interval",
+        type=int,
+        default=mineru.DEFAULT_POLL_INTERVAL,
+        help="MinerU 轮询间隔秒数",
+    )
+    mineru_group.add_argument(
+        "--timeout",
+        type=int,
+        default=mineru.DEFAULT_TIMEOUT_SECONDS,
+        help="MinerU 最长等待秒数",
+    )
 
     return parser
 
 
+def build_config_parser() -> argparse.ArgumentParser:
+    def add_config_file_argument(command_parser: argparse.ArgumentParser) -> None:
+        command_parser.add_argument(
+            "--config-file",
+            type=Path,
+            default=argparse.SUPPRESS,
+            help=argparse.SUPPRESS,
+        )
+
+    parser = argparse.ArgumentParser(
+        prog="cvt config",
+        description="管理 cvt 配置文件。",
+    )
+    parser.add_argument(
+        "--config-file",
+        type=Path,
+        default=CONFIG_PATH,
+        help=f"配置文件路径，默认 {CONFIG_PATH}",
+    )
+
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    init_parser = subparsers.add_parser("init", help="创建默认配置文件")
+    add_config_file_argument(init_parser)
+    init_parser.add_argument("--force", action="store_true", help="覆盖已有配置文件")
+
+    set_parser = subparsers.add_parser("set", help="写入 token 或 API 配置")
+    add_config_file_argument(set_parser)
+    set_parser.add_argument("--paddle-token", help="保存 Paddle token")
+    set_parser.add_argument("--paddle-api-url", help="保存 Paddle API 地址")
+    set_parser.add_argument("--mineru-token", help="保存 MinerU token")
+
+    show_parser = subparsers.add_parser("show", help="显示当前配置")
+    add_config_file_argument(show_parser)
+    show_parser.add_argument(
+        "--show-secrets",
+        action="store_true",
+        help="显示完整 token，默认会脱敏",
+    )
+
+    path_parser = subparsers.add_parser("path", help="显示配置文件路径")
+    add_config_file_argument(path_parser)
+    return parser
+
+
+def handle_config_command(argv: list[str]) -> int:
+    parser = build_config_parser()
+    args = parser.parse_args(argv)
+
+    if args.command == "path":
+        print(args.config_file.expanduser().resolve())
+        return 0
+
+    config_file: Path = args.config_file.expanduser()
+
+    if args.command == "init":
+        path = ensure_config_file(config_file, force=args.force)
+        print(f"[cvt] 配置文件: {path.resolve()}")
+        return 0
+
+    if args.command == "set":
+        if not any([args.paddle_token, args.paddle_api_url, args.mineru_token]):
+            parser.error("config set 至少需要一个配置项")
+        update_settings(
+            path=config_file,
+            paddle_token=args.paddle_token,
+            paddle_api_url=args.paddle_api_url,
+            mineru_token=args.mineru_token,
+        )
+        print(f"[cvt] 已更新配置: {config_file.resolve()}")
+        return 0
+
+    if args.command == "show":
+        settings = load_settings(config_file)
+        paddle_token = settings.paddle.token
+        mineru_token = settings.mineru.token
+        if not args.show_secrets:
+            paddle_token = mask_secret(paddle_token)
+            mineru_token = mask_secret(mineru_token)
+
+        print(f"config_file = {config_file.resolve()}")
+        print("[paddle]")
+        print(f"token = {paddle_token!r}")
+        print(f"api_url = {(settings.paddle.api_url or '')!r}")
+        print("[mineru]")
+        print(f"token = {mineru_token!r}")
+        return 0
+
+    parser.error(f"未知 config 命令: {args.command}")
+    return 2
+
+
 def main(argv: list[str] | None = None) -> int:
+    argv = sys.argv[1:] if argv is None else argv
+    if argv[:1] == ["config"]:
+        try:
+            return handle_config_command(argv[1:])
+        except Exception as exc:
+            print(f"错误: {exc}", file=sys.stderr)
+            return 1
+
     parser = build_parser()
     args = parser.parse_args(argv)
     dotenv = args.env_file or _find_dotenv(Path.cwd())
@@ -411,6 +591,8 @@ def main(argv: list[str] | None = None) -> int:
         _load_dotenv(dotenv)
 
     try:
+        settings = load_settings(args.config_file.expanduser())
+        _apply_settings(args, settings)
         written = convert(args)
     except Exception as exc:
         print(f"错误: {exc}", file=sys.stderr)
