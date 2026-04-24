@@ -87,7 +87,7 @@ cvt report.md -o report.pdf
 - `paddle`: 调用 Paddle layout-parsing API，支持 `md/json`。
 - `mineru`: 调用 MinerU API，支持下载 `zip`，并可从 zip 中汇总 `md/json`。
 - `pandoc`: 调用本机 pandoc，适合 DOCX/Markdown 互转。
-- `pymupdf4llm`: 本地 PDF 转 `md/json` 后备方案，需要自行安装依赖。
+- `pymupdf4llm`: 默认随 `cvt` 安装的本地 PDF 转 `md/json` 后备方案。
 
 禁用自动回退：
 

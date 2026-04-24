@@ -180,7 +180,7 @@ def _convert_with_pymupdf4llm(
         import pymupdf4llm  # type: ignore[import-not-found]
     except ImportError as exc:
         raise RuntimeError(
-            "未安装 pymupdf4llm。请安装后重试，或配置 Paddle/MinerU token。"
+            "当前环境缺少 pymupdf4llm。请重新安装 cvt，或配置 Paddle/MinerU token。"
         ) from exc
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -228,6 +228,24 @@ def _read_json(path: Path) -> Any:
         return {"path": str(path), "text": path.read_text(encoding="utf-8")}
 
 
+def _copy_mineru_image_dirs(extract_dir: Path, output_dir: Path) -> Path | None:
+    image_dirs = sorted(
+        path
+        for path in extract_dir.rglob("images")
+        if path.is_dir()
+        and not any(
+            parent.name == "images" for parent in path.relative_to(extract_dir).parents
+        )
+    )
+    if not image_dirs:
+        return None
+
+    target_dir = output_dir / "images"
+    for image_dir in image_dirs:
+        shutil.copytree(image_dir, target_dir, dirs_exist_ok=True)
+    return target_dir
+
+
 def _materialize_mineru_output(
     zip_path: Path,
     output_path: Path,
@@ -253,7 +271,12 @@ def _materialize_mineru_output(
 
         output_path.parent.mkdir(parents=True, exist_ok=True)
         output_path.write_text("\n".join(parts).rstrip() + "\n", encoding="utf-8")
-        return [output_path, extract_dir]
+        written = [output_path]
+        image_dir = _copy_mineru_image_dirs(extract_dir, output_path.parent)
+        if image_dir is not None:
+            written.append(image_dir)
+        written.append(extract_dir)
+        return written
 
     if output_format == "json":
         json_files = sorted(extract_dir.rglob("*.json"))
