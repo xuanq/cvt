@@ -192,16 +192,25 @@ def write_outputs(
             written.append(page_path)
 
     if download_assets:
-        asset_root = assets_dir or output_path.parent / f"{output_path.stem}_assets"
+        asset_root = assets_dir or output_path.parent
+        image_dirs: set[Path] = set()
+        layout_dir = asset_root / "layout"
+
         for page_index, page in enumerate(pages, start=1):
             markdown = page.get("markdown") or {}
             for img_path, img_url in (markdown.get("images") or {}).items():
-                _download_url(str(img_url), _safe_output_path(asset_root, str(img_path)))
+                saved_path = _safe_output_path(asset_root, str(img_path))
+                _download_url(str(img_url), saved_path)
+                image_dirs.add(saved_path.parent)
             for img_name, img_url in (page.get("outputImages") or {}).items():
                 name = f"{img_name}_{page_index}.jpg"
-                _download_url(str(img_url), asset_root / name)
-        if asset_root.exists():
-            written.append(asset_root)
+                _download_url(str(img_url), layout_dir / name)
+
+        for directory in sorted(image_dirs):
+            if directory.exists():
+                written.append(directory)
+        if layout_dir.exists():
+            written.append(layout_dir)
 
     return written
 

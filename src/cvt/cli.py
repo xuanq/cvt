@@ -19,6 +19,64 @@ MARKDOWN_EXTENSIONS = {".md", ".markdown"}
 OUTPUT_FORMATS = {"md", "json", "zip", "docx", "pdf"}
 
 
+def _find_dotenv(start: Path) -> Path | None:
+    current = start.resolve()
+    if current.is_file():
+        current = current.parent
+
+    for directory in (current, *current.parents):
+        dotenv = directory / ".env"
+        if dotenv.is_file():
+            return dotenv
+    return None
+
+
+def _strip_inline_comment(value: str) -> str:
+    quote: str | None = None
+    escaped = False
+
+    for index, char in enumerate(value):
+        if escaped:
+            escaped = False
+            continue
+        if char == "\\":
+            escaped = True
+            continue
+        if quote:
+            if char == quote:
+                quote = None
+            continue
+        if char in {"'", '"'}:
+            quote = char
+            continue
+        if char == "#":
+            return value[:index].rstrip()
+
+    return value.strip()
+
+
+def _load_dotenv(path: Path) -> None:
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[len("export ") :].strip()
+        if "=" not in line:
+            continue
+
+        key, value = line.split("=", 1)
+        key = key.strip()
+        if not key or not key.replace("_", "").isalnum() or key[0].isdigit():
+            continue
+
+        value = _strip_inline_comment(value.strip())
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+            value = value[1:-1]
+
+        os.environ.setdefault(key, value)
+
+
 def _infer_output_format(output: Path | None, requested: str | None) -> str:
     if requested:
         return requested
@@ -39,7 +97,7 @@ def _default_output_path(
     if output is not None:
         return output
     base_dir = output_dir or Path.cwd()
-    return base_dir / f"{input_path.stem}.{output_format}"
+    return base_dir / input_path.stem / f"{input_path.stem}.{output_format}"
 
 
 def _require_input(path: Path) -> None:
@@ -290,6 +348,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("-o", "--output", type=Path, help="输出文件路径")
     parser.add_argument("-d", "--output-dir", type=Path, help="未指定 --output 时的输出目录")
     parser.add_argument(
+        "--env-file",
+        type=Path,
+        help="加载指定 .env 文件；默认从当前目录向上查找 .env",
+    )
+    parser.add_argument(
         "--to",
         choices=sorted(OUTPUT_FORMATS),
         help="输出格式；默认从 --output 后缀推断，否则为 md",
@@ -343,6 +406,9 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    dotenv = args.env_file or _find_dotenv(Path.cwd())
+    if dotenv is not None:
+        _load_dotenv(dotenv)
 
     try:
         written = convert(args)

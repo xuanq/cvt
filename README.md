@@ -10,12 +10,19 @@ uv tool install .
 
 ## 配置
 
+CLI 会默认从当前目录向上查找 `.env`，也可以使用 `--env-file` 指定路径：
+
+```env
+PADDLE_TOKEN=your-paddle-token
+MINERU_TOKEN=your-mineru-token
+```
+
+Shell 环境变量和命令行参数同样支持：
+
 ```bash
 export PADDLE_TOKEN="your-paddle-token"
 export MINERU_TOKEN="your-mineru-token"
 ```
-
-也可以通过命令行参数传入：
 
 ```bash
 cvt input.pdf --paddle-token "$PADDLE_TOKEN"
@@ -27,8 +34,10 @@ cvt input.pdf --engine mineru --mineru-token "$MINERU_TOKEN"
 默认输出 Markdown，PDF/图片优先使用 Paddle OCR-VL：
 
 ```bash
-cvt paper.pdf -o paper.md
+cvt paper.pdf
 ```
+
+不指定 `--output` 时，结果会写入同名目录，例如 `paper/paper.md`、`paper/imgs/`、`paper/layout/`。
 
 输出 Paddle 原始 JSON：
 
