@@ -1,16 +1,13 @@
+"""解析统一命令行参数、加载配置并调用公共转换 API。"""
+
 from __future__ import annotations
 
 import argparse
-import json
 import os
-import shutil
-import subprocess
 import sys
-import zipfile
 from pathlib import Path
-from typing import Any
 
-from . import mineru, paddle
+from . import api, mineru, paddle
 from .settings import (
     CONFIG_PATH,
     CvtSettings,
@@ -20,13 +17,11 @@ from .settings import (
     update_settings,
 )
 
-IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff"}
-MARKDOWN_EXTENSIONS = {".md", ".markdown"}
-
 OUTPUT_FORMATS = {"md", "json", "zip", "docx", "pdf"}
 
 
 def _find_dotenv(start: Path) -> Path | None:
+    """从起始路径向上查找 ``.env``；返回首个匹配路径或 ``None``。"""
     current = start.resolve()
     if current.is_file():
         current = current.parent
@@ -39,6 +34,7 @@ def _find_dotenv(start: Path) -> Path | None:
 
 
 def _strip_inline_comment(value: str) -> str:
+    """移除未被引号包围的行内注释；输入原值，返回清理后的值。"""
     quote: str | None = None
     escaped = False
 
@@ -63,6 +59,7 @@ def _strip_inline_comment(value: str) -> str:
 
 
 def _load_dotenv(path: Path) -> None:
+    """把 dotenv 中尚未设置的变量加载到环境；输入文件路径，无返回值。"""
     for raw_line in path.read_text(encoding="utf-8").splitlines():
         line = raw_line.strip()
         if not line or line.startswith("#"):
@@ -89,6 +86,7 @@ def _resolve_setting(
     config_value: str | None,
     env_name: str,
 ) -> str | None:
+    """按 CLI、配置、环境变量顺序解析设置值。"""
     for value in (cli_value, config_value, os.getenv(env_name)):
         if value and value.strip():
             return value
@@ -96,6 +94,7 @@ def _resolve_setting(
 
 
 def _apply_settings(args: argparse.Namespace, settings: CvtSettings) -> None:
+    """将配置和环境变量补充到 CLI 参数；输入参数与配置，无返回值。"""
     args.paddle_token = _resolve_setting(
         args.paddle_token,
         settings.paddle.token,
@@ -113,298 +112,8 @@ def _apply_settings(args: argparse.Namespace, settings: CvtSettings) -> None:
     )
 
 
-def _infer_output_format(output: Path | None, requested: str | None) -> str:
-    if requested:
-        return requested
-    if output and output.suffix:
-        suffix = output.suffix.lower().lstrip(".")
-        if suffix in OUTPUT_FORMATS:
-            return suffix
-    return "md"
-
-
-def _default_output_path(
-    input_path: Path,
-    *,
-    output: Path | None,
-    output_dir: Path | None,
-    output_format: str,
-) -> Path:
-    if output is not None:
-        return output
-    base_dir = output_dir or Path.cwd()
-    return base_dir / input_path.stem / f"{input_path.stem}.{output_format}"
-
-
-def _require_input(path: Path) -> None:
-    if not path.exists():
-        raise FileNotFoundError(f"文件不存在: {path}")
-    if not path.is_file():
-        raise ValueError(f"不是文件: {path}")
-
-
-def _run_pandoc(input_path: Path, output_path: Path, output_format: str) -> list[Path]:
-    if shutil.which("pandoc") is None:
-        raise RuntimeError(
-            "未找到 pandoc。请先安装 pandoc，或为 PDF/图片输入选择 Paddle/MinerU。"
-        )
-
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    command = ["pandoc", str(input_path), "-o", str(output_path)]
-    written = [output_path]
-
-    if input_path.suffix.lower() in {".docx", ".doc"} and output_format == "md":
-        media_dir = output_path.parent / f"{output_path.stem}_media"
-        command.extend(["--to", "gfm", f"--extract-media={media_dir}"])
-        written.append(media_dir)
-    elif output_format == "json":
-        command.extend(["--to", "json"])
-
-    result = subprocess.run(command, check=False, text=True, capture_output=True)
-    if result.returncode != 0:
-        stderr = result.stderr.strip() or result.stdout.strip()
-        raise RuntimeError(f"pandoc 转换失败: {stderr}")
-
-    return [path for path in written if path.exists()]
-
-
-def _convert_with_pymupdf4llm(
-    input_path: Path,
-    output_path: Path,
-    output_format: str,
-) -> list[Path]:
-    if output_format not in {"md", "json"}:
-        raise ValueError("pymupdf4llm 仅支持输出 md/json。")
-
-    try:
-        import pymupdf4llm  # type: ignore[import-not-found]
-    except ImportError as exc:
-        raise RuntimeError(
-            "当前环境缺少 pymupdf4llm。请重新安装 cvt，或配置 Paddle/MinerU token。"
-        ) from exc
-
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    markdown = pymupdf4llm.to_markdown(str(input_path))
-    if output_format == "md":
-        output_path.write_text(markdown, encoding="utf-8", newline="\n")
-    else:
-        output_path.write_text(
-            json.dumps(
-                {"source": str(input_path), "markdown": markdown},
-                ensure_ascii=False,
-                indent=2,
-            ),
-            encoding="utf-8",
-            newline="\n",
-        )
-    return [output_path]
-
-
-def _safe_extract_zip(zip_path: Path, output_dir: Path) -> None:
-    output_dir.mkdir(parents=True, exist_ok=True)
-    root = output_dir.resolve()
-
-    with zipfile.ZipFile(zip_path) as archive:
-        for member in archive.infolist():
-            target = (output_dir / member.filename).resolve()
-            try:
-                target.relative_to(root)
-            except ValueError as exc:
-                raise RuntimeError(f"压缩包包含不安全路径: {member.filename}") from exc
-
-            if member.is_dir():
-                target.mkdir(parents=True, exist_ok=True)
-                continue
-
-            target.parent.mkdir(parents=True, exist_ok=True)
-            with archive.open(member) as src, target.open("wb") as dst:
-                shutil.copyfileobj(src, dst)
-
-
-def _read_json(path: Path) -> Any:
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError:
-        return {"path": str(path), "text": path.read_text(encoding="utf-8")}
-
-
-def _copy_mineru_image_dirs(extract_dir: Path, output_dir: Path) -> Path | None:
-    image_dirs = sorted(
-        path
-        for path in extract_dir.rglob("images")
-        if path.is_dir()
-        and not any(
-            parent.name == "images" for parent in path.relative_to(extract_dir).parents
-        )
-    )
-    if not image_dirs:
-        return None
-
-    target_dir = output_dir / "images"
-    for image_dir in image_dirs:
-        shutil.copytree(image_dir, target_dir, dirs_exist_ok=True)
-    return target_dir
-
-
-def _materialize_mineru_output(
-    zip_path: Path,
-    output_path: Path,
-    output_format: str,
-) -> list[Path]:
-    if output_format == "zip":
-        return [zip_path]
-
-    extract_dir = output_path.parent / f"{output_path.stem}_mineru"
-    _safe_extract_zip(zip_path, extract_dir)
-
-    if output_format == "md":
-        markdown_files = sorted(extract_dir.rglob("*.md"))
-        if not markdown_files:
-            raise RuntimeError(f"MinerU 结果中没有找到 Markdown 文件: {extract_dir}")
-
-        parts: list[str] = []
-        for markdown_file in markdown_files:
-            if parts:
-                parts.append("\n\n")
-            parts.append(f"<!-- {markdown_file.relative_to(extract_dir)} -->\n\n")
-            parts.append(markdown_file.read_text(encoding="utf-8").rstrip())
-
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        output_path.write_text("\n".join(parts).rstrip() + "\n", encoding="utf-8")
-        written = [output_path]
-        image_dir = _copy_mineru_image_dirs(extract_dir, output_path.parent)
-        if image_dir is not None:
-            written.append(image_dir)
-        written.append(extract_dir)
-        return written
-
-    if output_format == "json":
-        json_files = sorted(extract_dir.rglob("*.json"))
-        if not json_files:
-            raise RuntimeError(f"MinerU 结果中没有找到 JSON 文件: {extract_dir}")
-
-        payload = {
-            "source_zip": str(zip_path),
-            "extract_dir": str(extract_dir),
-            "files": [
-                {
-                    "path": str(path.relative_to(extract_dir)),
-                    "content": _read_json(path),
-                }
-                for path in json_files
-            ],
-        }
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        output_path.write_text(
-            json.dumps(payload, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-            newline="\n",
-        )
-        return [output_path, extract_dir]
-
-    raise ValueError(f"MinerU 输出格式仅支持 md/json/zip，不支持: {output_format}")
-
-
-def _convert_with_mineru(
-    args: argparse.Namespace,
-    output_path: Path,
-    output_format: str,
-) -> list[Path]:
-    zip_path = (
-        output_path
-        if output_format == "zip"
-        else output_path.with_suffix(".mineru.zip")
-    )
-    downloaded_zip = mineru.convert_file(
-        args.input,
-        output_path=zip_path,
-        token=args.mineru_token,
-        data_id=args.data_id,
-        enable_formula=args.enable_formula,
-        enable_table=args.enable_table,
-        language=args.language,
-        model_version=args.model_version,
-        is_ocr=args.is_ocr,
-        interval=args.interval,
-        timeout_seconds=args.timeout,
-    )
-    return _materialize_mineru_output(downloaded_zip, output_path, output_format)
-
-
-def _convert_with_paddle(
-    args: argparse.Namespace,
-    output_path: Path,
-    output_format: str,
-) -> list[Path]:
-    if output_format not in {"md", "json"}:
-        raise ValueError("Paddle 输出格式仅支持 md/json。")
-    return paddle.convert_document(
-        args.input,
-        output_path=output_path,
-        output_format=output_format,
-        token=args.paddle_token,
-        api_url=args.paddle_api_url,
-        timeout=args.paddle_timeout,
-        split_pages=args.split_pages,
-        download_assets=args.download_assets,
-    )
-
-
-def _candidate_engines(args: argparse.Namespace, output_format: str) -> list[str]:
-    if args.engine != "auto":
-        return [args.engine]
-
-    suffix = args.input.suffix.lower()
-    if suffix in {".docx", ".doc"} or suffix in MARKDOWN_EXTENSIONS:
-        return ["pandoc"]
-
-    if suffix == ".pdf" or suffix in IMAGE_EXTENSIONS:
-        engines = ["paddle"]
-        if args.fallback and (args.mineru_token or os.getenv("MINERU_TOKEN")):
-            engines.append("mineru")
-        if args.fallback and output_format in {"md", "json"}:
-            engines.append("pymupdf4llm")
-        return engines
-
-    return ["pandoc"]
-
-
-def convert(args: argparse.Namespace) -> list[Path]:
-    _require_input(args.input)
-    output_format = _infer_output_format(args.output, args.to)
-    output_path = _default_output_path(
-        args.input,
-        output=args.output,
-        output_dir=args.output_dir,
-        output_format=output_format,
-    )
-
-    failures: list[str] = []
-    for engine in _candidate_engines(args, output_format):
-        try:
-            if engine == "paddle":
-                print("[cvt] 使用 Paddle OCR-VL")
-                return _convert_with_paddle(args, output_path, output_format)
-            if engine == "mineru":
-                print("[cvt] 使用 MinerU")
-                return _convert_with_mineru(args, output_path, output_format)
-            if engine == "pandoc":
-                print("[cvt] 使用 pandoc")
-                return _run_pandoc(args.input, output_path, output_format)
-            if engine == "pymupdf4llm":
-                print("[cvt] 使用 pymupdf4llm")
-                return _convert_with_pymupdf4llm(args.input, output_path, output_format)
-            raise ValueError(f"未知引擎: {engine}")
-        except Exception as exc:
-            failures.append(f"{engine}: {exc}")
-            if not args.fallback or args.engine != "auto":
-                raise
-            print(f"[cvt] {engine} 失败，尝试下一个引擎: {exc}", file=sys.stderr)
-
-    raise RuntimeError("所有转换引擎均失败:\n" + "\n".join(failures))
-
-
 def build_parser() -> argparse.ArgumentParser:
+    """构建主命令解析器；无输入，返回解析器。"""
     parser = argparse.ArgumentParser(
         prog="cvt",
         description="将 PDF、图片、DOCX、Markdown 转为适合大模型读取的 md/json，或通过 pandoc 导出 docx/pdf。",
@@ -455,7 +164,26 @@ def build_parser() -> argparse.ArgumentParser:
         "--paddle-timeout", type=int, default=600, help="Paddle 请求超时秒数"
     )
     paddle_group.add_argument(
-        "--split-pages", action="store_true", help="Paddle 输出 md 时同时保存分页 md"
+        "--no-merge-pages",
+        dest="merge_pages",
+        action="store_false",
+        help="不合并 Paddle 原始分页 Markdown，只保存分页文件",
+    )
+    paddle_group.add_argument(
+        "--keep-layout-images",
+        action="store_true",
+        help="保留 Paddle 返回的 layout_det_res_x.jpg 等版面检测图",
+    )
+    paddle_group.add_argument(
+        "--parse-chart",
+        action="store_true",
+        help="开启 Paddle 图表解析，默认关闭",
+    )
+    paddle_group.add_argument(
+        "--paddle-interval",
+        type=int,
+        default=paddle.DEFAULT_POLL_INTERVAL_SECONDS,
+        help="Paddle 任务轮询间隔秒数",
     )
     paddle_group.add_argument(
         "--no-assets",
@@ -463,7 +191,7 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_false",
         help="Paddle 输出 md 时不下载图片资源",
     )
-    paddle_group.set_defaults(download_assets=True)
+    paddle_group.set_defaults(download_assets=True, merge_pages=True)
 
     mineru_group = parser.add_argument_group("MinerU")
     mineru_group.add_argument(
@@ -507,7 +235,10 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def build_config_parser() -> argparse.ArgumentParser:
+    """构建配置子命令解析器；无输入，返回解析器。"""
+
     def add_config_file_argument(command_parser: argparse.ArgumentParser) -> None:
+        """为子命令补充隐藏的配置路径参数；无返回值。"""
         command_parser.add_argument(
             "--config-file",
             type=Path,
@@ -552,6 +283,7 @@ def build_config_parser() -> argparse.ArgumentParser:
 
 
 def handle_config_command(argv: list[str]) -> int:
+    """执行配置子命令；输入参数列表，返回进程退出码。"""
     parser = build_config_parser()
     args = parser.parse_args(argv)
 
@@ -599,6 +331,7 @@ def handle_config_command(argv: list[str]) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
+    """执行 cvt CLI；输入可选参数列表，返回进程退出码。"""
     argv = sys.argv[1:] if argv is None else argv
     if argv[:1] == ["config"]:
         try:
@@ -616,7 +349,31 @@ def main(argv: list[str] | None = None) -> int:
     try:
         settings = load_settings(args.config_file.expanduser())
         _apply_settings(args, settings)
-        written = convert(args)
+        written = api.convert_document(
+            args.input,
+            output_path=args.output,
+            output_dir=args.output_dir,
+            output_format=args.to,
+            engine=args.engine,
+            fallback=args.fallback,
+            paddle_token=args.paddle_token,
+            paddle_api_url=args.paddle_api_url,
+            paddle_timeout=args.paddle_timeout,
+            paddle_interval=args.paddle_interval,
+            merge_pages=args.merge_pages,
+            keep_layout_images=args.keep_layout_images,
+            parse_chart=args.parse_chart,
+            download_assets=args.download_assets,
+            mineru_token=args.mineru_token,
+            data_id=args.data_id,
+            enable_formula=args.enable_formula,
+            enable_table=args.enable_table,
+            language=args.language,
+            model_version=args.model_version,
+            is_ocr=args.is_ocr,
+            mineru_interval=args.interval,
+            mineru_timeout=args.timeout,
+        )
     except Exception as exc:
         print(f"错误: {exc}", file=sys.stderr)
         return 1

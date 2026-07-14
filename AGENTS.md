@@ -1,59 +1,143 @@
-# Repository Guidelines
+# 仓库开发规范
 
-## Project Structure & Module Organization
+## 项目结构与模块职责
 
-- `src/cvt/cli.py`: unified command-line interface and engine selection.
-- `src/cvt/paddle.py`: Paddle OCR-VL API wrapper and output materialization.
-- `src/cvt/mineru.py`: MinerU API workflow and legacy single-script CLI.
-- `src/cvt/__init__.py`: package entry point used by `cvt = "cvt:main"`.
-- `README.md`: user-facing installation and usage examples.
-- `pyproject.toml` and `uv.lock`: package metadata and locked dependencies.
+- `src/cvt/api.py`：公共 Python API、输出路径推断、转换引擎选择与失败回退。
+- `src/cvt/cli.py`：统一命令行参数、配置加载以及对公共 API 的调用。
+- `src/cvt/paddle.py`：PaddleOCR-VL 异步任务 API 和结果落盘。
+- `src/cvt/mineru.py`：MinerU API 工作流及兼容的独立脚本入口。
+- `src/cvt/local.py`：pandoc 与 pymupdf4llm 本地引擎适配。
+- `src/cvt/settings.py`：用户级 TOML 配置的读取、保存和脱敏展示。
+- `src/cvt/__init__.py`：包级公共接口和 `cvt = "cvt:main"` 命令入口。
+- `tests/`：不依赖真实第三方服务的自动化测试。
+- `README.md`：面向用户的安装、配置和使用说明。
+- `pyproject.toml`、`uv.lock`：项目元数据、依赖声明和锁定版本。
 
-There is no `tests/` directory yet. Add tests under `tests/` for behavior that can be verified without live third-party APIs.
+公共转换编排应放在 `api.py`，服务逻辑放在对应服务模块中。`cli.py` 负责命令行界面并调用公共 API；不得要求脚本调用者构造 `argparse.Namespace`。
 
-## Build, Test, and Development Commands
+## 构建、测试与开发命令
 
-- `uv run cvt --help`: run the local CLI entry point.
-- `uv run python -m compileall src`: syntax-check all source modules.
-- `uv build`: build distributable package artifacts.
-- `uv tool install .`: install the CLI locally as a uv tool.
+- `uv run cvt --help`：运行本地 CLI 并检查参数说明。
+- `uv run pytest -q`：运行自动化测试。
+- `uv run python -m compileall src`：检查所有源码模块的语法。
+- `uv build`：构建源码包和 wheel。
+- `uv tool install .`：把当前项目安装为本地 uv 工具。
 
-For service-backed conversion, set tokens first:
+安装 Python 依赖统一使用：
+
+```bash
+uv add <依赖名>
+uv add --dev <开发依赖名>
+```
+
+运行 Python 脚本统一使用 `uv run`，临时运行工具使用 `uvx`。
+
+调用在线转换服务前设置 token：
 
 ```bash
 export PADDLE_TOKEN="..."
 export MINERU_TOKEN="..."
-cvt paper.pdf -o paper.md
+uv run cvt paper.pdf -o paper.md
 ```
 
-## Coding Style & Naming Conventions
+## 编码与命名规范
 
-Use Python 3.13-compatible code and keep modules import-safe: no network calls or file conversion at import time. Prefer typed signatures, `Path` objects, and small service-specific helpers.
+- 兼容 Python 3.13。
+- 模块必须可安全导入；导入时不得发起网络请求或执行文件转换。
+- 函数和变量使用 `snake_case`，常量使用 `UPPER_SNAKE_CASE`。
+- CLI 长选项使用含义明确的 kebab-case，例如 `--paddle-token`。
+- 优先使用带类型参数的类型标注、`Path` 对象和职责单一的小函数。
+- 每个函数都必须提供输入、输出的类型标注和中文 docstring，说明参数与返回值含义。
+- 模块说明、类说明、函数说明、参数 description、日志、帮助信息和代码注释统一使用中文。
+- 复杂逻辑需要添加说明性注释；完整逻辑块使用星号分隔注释：
 
-Follow existing naming patterns:
+```python
+# ************************************************************
+# 说明该逻辑块的整体目标、关键约束或处理顺序。
+# ************************************************************
+```
 
-- Functions and variables: `snake_case`.
-- Constants: `UPPER_SNAKE_CASE`.
-- CLI options: long, descriptive kebab-case such as `--paddle-token`.
+- 注释应简洁且解释“为什么”，避免逐行复述代码。
+- 不重复实现 Paddle、MinerU、pandoc 或 pymupdf4llm 已提供的转换能力。
 
-Keep comments sparse and useful. Avoid reimplementing conversion logic already provided by Paddle, MinerU, pandoc, or pymupdf4llm.
+## 设计原则
 
-## Testing Guidelines
+### 编码前先确认
 
-No test framework is configured yet. When adding tests, prefer `pytest` and name files `tests/test_*.py`. Mock Paddle and MinerU HTTP calls; do not require real API tokens.
+- 明确说明实现所依据的假设。
+- 存在多种合理解释时先列出差异，不静默选择。
+- 发现更简单的方案时主动指出。
+- 关键需求不明确且不同选择会明显改变结果时，先停止并询问。
 
-At minimum, verify CLI argument behavior, output path inference, engine selection, and safe archive extraction. Continue using `uv run python -m compileall src` as a quick baseline check.
+### 优先保持简单
 
-## Commit & Pull Request Guidelines
+- 只实现明确要求的功能。
+- 不为单次使用引入抽象层。
+- 不增加未要求的配置项、扩展点或容错逻辑。
+- 如果实现明显可以更短、更直接，应先简化再提交。
 
-This repository has no commit history, so there is no local convention yet. Use concise, imperative commit messages:
+### 保持修改范围精确
 
-- `Add unified conversion CLI`
-- `Wrap Paddle layout parsing API`
-- `Document MinerU fallback behavior`
+- 只修改与当前需求直接相关的代码。
+- 不顺手重构、重新格式化或清理无关代码。
+- 遵循现有风格，即使个人偏好不同。
+- 仅删除本次修改造成的未使用导入、变量和函数。
+- 发现无关问题时在交付说明中指出，不擅自修改。
 
-Pull requests should include a summary, verification commands, and any API or environment variables needed for manual testing. For CLI behavior changes, include before/after command examples.
+### 以可验证结果为目标
 
-## Security & Configuration Tips
+开始多步骤任务前给出简短计划，每一步包含验证方式。例如：
 
-Never commit real `PADDLE_TOKEN` or `MINERU_TOKEN` values. Keep secrets in environment variables or a local `.env` file. Treat downloaded archives and remote image URLs as untrusted; preserve the safe extraction checks in `cli.py`.
+```text
+1. 增加输入校验 → 验证：无效输入测试通过
+2. 接入 CLI 参数 → 验证：帮助信息和参数解析测试通过
+3. 构建发布包 → 验证：uv build 成功
+```
+
+功能完成后持续验证，直到成功标准满足。
+
+## 测试规范
+
+- 使用 `pytest`，测试文件命名为 `tests/test_*.py`。
+- Paddle 和 MinerU HTTP 请求必须 mock，不得依赖真实 token 或在线服务。
+- 至少覆盖 CLI 参数行为、输出路径推断、引擎选择、安全解压，以及本次修改涉及的默认值和边界行为。
+- 每次修改至少运行：
+
+```bash
+uv run pytest -q
+uv run python -m compileall src
+```
+
+- 涉及打包或公共导出时额外运行 `uv build`。
+
+## 安全与配置
+
+- 禁止提交真实的 `PADDLE_TOKEN` 或 `MINERU_TOKEN`。
+- secret 仅保存在环境变量、本地 `.env` 或用户配置文件中。
+- 下载的压缩包、远端图片 URL 和服务返回路径均视为不可信输入。
+- 修改结果解压逻辑时必须保留路径穿越检查。
+
+## 提交与合并请求
+
+提交信息使用简短、祈使式中文，例如：
+
+- `增加统一转换 API`
+- `升级 Paddle 异步任务接口`
+- `补充 MinerU 回退说明`
+
+合并请求应包含：
+
+- 修改摘要。
+- 实际执行的验证命令及结果。
+- 手动测试所需的 API、环境变量或外部工具。
+- CLI 行为发生变化时提供修改前后的命令示例。
+
+## 功能交付说明
+
+完成一个功能后，应给出代码阅读路径。例如：
+
+```text
+从 cli.py 的 main 进入命令行入口，解析参数后调用 api.py 的
+convert_document；该函数选择转换引擎，再调用 paddle.py 或 mineru.py
+中的服务函数，最后返回实际生成的文件路径。
+```

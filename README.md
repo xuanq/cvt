@@ -48,7 +48,15 @@ cvt input.pdf --engine mineru --mineru-token "$MINERU_TOKEN"
 cvt paper.pdf
 ```
 
-不指定 `--output` 时，结果会写入同名目录，例如 `paper/paper.md`、`paper/imgs/`、`paper/layout/`。
+不指定 `--output` 时，结果会写入同名目录，例如 `paper/paper.md`、`paper/imgs/`。Paddle 默认合并分页 Markdown、不保留版面检测图、不开启图表解析；可按需调整：
+
+```bash
+# 只保留原始分页 Markdown
+cvt paper.pdf --no-merge-pages
+
+# 保留 layout_det_res_x.jpg，并开启图表解析
+cvt paper.pdf --keep-layout-images --parse-chart
+```
 
 输出 Paddle 原始 JSON：
 
@@ -94,3 +102,45 @@ cvt report.md -o report.pdf
 ```bash
 cvt paper.pdf --no-fallback -o paper.md
 ```
+
+## Python 脚本调用
+
+安装为项目依赖后，可直接调用统一转换函数：
+
+```python
+from pathlib import Path
+
+from cvt import PaddleOptions, convert_document
+
+written = convert_document(
+    Path("paper.pdf"),
+    output_path=Path("paper.md"),
+    engine="paddle",
+    merge_pages=True,
+    keep_layout_images=False,
+    parse_chart=False,
+)
+print(written)
+```
+
+常用选项可以直接传给统一 API；需要调整完整 Paddle 请求参数时，使用 `PaddleOptions`：
+
+```python
+from cvt import PaddleOptions, convert_document
+
+written = convert_document(
+    "paper.pdf",
+    output_path="paper.md",
+    engine="paddle",
+    paddle_options=PaddleOptions(
+        use_chart_recognition=True,
+        use_doc_orientation_classify=True,
+        merge_tables=True,
+        markdown_ignore_labels=["header", "footer", "footnote"],
+    ),
+)
+```
+
+`PaddleOptions.to_payload()` 可以查看最终发送给 Paddle 的 `optionalPayload`。如果同时提供 `parse_chart` 和 `paddle_options`，以 `paddle_options` 中的设置为准。
+
+若只需要 Paddle 的底层能力，也可从 `cvt.paddle` 导入 `submit_job`、`wait_for_result`、`download_result`、`write_outputs` 或 `convert_document`。
