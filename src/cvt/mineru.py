@@ -5,14 +5,20 @@
 # ]
 # ///
 
+"""封装 MinerU 文件上传、任务轮询和结果压缩包下载流程。"""
+
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import re
+import shutil
 import sys
 import time
+import zipfile
 from pathlib import Path
+from typing import Any
 from urllib.parse import urlparse
 
 import requests
@@ -25,6 +31,7 @@ DATA_ID_PATTERN = re.compile(r"^[A-Za-z0-9_.-]{1,128}$")
 
 
 def str2bool(value: str) -> bool:
+    """解析命令行布尔字符串；输入文本，返回对应布尔值。"""
     value = value.strip().lower()
     if value in {"1", "true", "t", "yes", "y", "on"}:
         return True
@@ -36,6 +43,7 @@ def str2bool(value: str) -> bool:
 
 
 def build_headers(token: str) -> dict[str, str]:
+    """构造 MinerU 请求头；输入 token，返回鉴权请求头。"""
     return {
         "Authorization": f"Bearer {token}",
         "Content-Type": "application/json",
@@ -43,6 +51,7 @@ def build_headers(token: str) -> dict[str, str]:
 
 
 def validate_file(path: Path) -> None:
+    """校验本地输入文件；输入路径，无返回值。"""
     if not path.exists():
         raise FileNotFoundError(f"文件不存在: {path}")
     if not path.is_file():
@@ -50,6 +59,7 @@ def validate_file(path: Path) -> None:
 
 
 def validate_data_id(data_id: str) -> None:
+    """校验 MinerU 业务 ID；输入 ID，无返回值。"""
     if not DATA_ID_PATTERN.fullmatch(data_id):
         raise ValueError(
             "data_id 不合法。仅允许大小写字母、数字、下划线(_)、短横线(-)、英文句号(.)，且长度不超过 128。"
@@ -57,6 +67,7 @@ def validate_data_id(data_id: str) -> None:
 
 
 def guess_output_name_from_url(url: str) -> str:
+    """从下载地址推断文件名；输入 URL，返回安全的默认文件名。"""
     parsed = urlparse(url)
     name = Path(parsed.path).name
     return name or "mineru_result.zip"
@@ -125,7 +136,7 @@ def upload_file(upload_url: str, file_path: Path) -> None:
         )
 
 
-def fetch_batch_result(token: str, batch_id: str) -> dict:
+def fetch_batch_result(token: str, batch_id: str) -> dict[str, Any]:
     """
     查询批量解析结果
     """
@@ -168,14 +179,15 @@ def poll_until_done(
 
         if state == "done":
             full_zip_url = item.get("full_zip_url")
-            if not full_zip_url:
+            if not isinstance(full_zip_url, str) or not full_zip_url:
                 raise RuntimeError(f"任务已完成，但未返回 full_zip_url: {item}")
             return full_zip_url
 
         if state in {"failed", "error"}:
             raise RuntimeError(f"解析失败: {err_msg or item}")
 
-        progress = item.get("extract_progress") or {}
+        progress_value = item.get("extract_progress")
+        progress = progress_value if isinstance(progress_value, dict) else {}
         extracted_pages = progress.get("extracted_pages")
         total_pages = progress.get("total_pages")
         start_time = progress.get("start_time")
@@ -195,6 +207,12 @@ def poll_until_done(
 
 
 def download_file(url: str, output_path: Path) -> None:
+    """流式下载文件。
+
+    Args:
+        url: 远端下载地址。
+        output_path: 本地目标路径。
+    """
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     with requests.get(url, stream=True, timeout=600) as resp:
@@ -219,6 +237,24 @@ def convert_file(
     interval: int = DEFAULT_POLL_INTERVAL,
     timeout_seconds: int = DEFAULT_TIMEOUT_SECONDS,
 ) -> Path:
+    """提交 MinerU 转换并下载结果压缩包。
+
+    Args:
+        file_path: 本地输入文件。
+        output_path: 可选输出 zip 路径。
+        token: MinerU token，为空时读取环境变量。
+        data_id: 可选业务数据 ID。
+        enable_formula: 是否识别公式。
+        enable_table: 是否识别表格。
+        language: 文档语言。
+        model_version: MinerU 模型版本。
+        is_ocr: 是否启用 OCR。
+        interval: 轮询间隔秒数。
+        timeout_seconds: 总超时秒数。
+
+    Returns:
+        下载完成的 zip 路径。
+    """
     token = token or os.getenv("MINERU_TOKEN")
     if not token:
         raise ValueError(
@@ -257,7 +293,118 @@ def convert_file(
     return output_path
 
 
+def _safe_extract_zip(zip_path: Path, output_dir: Path) -> None:
+    """安全解压 MinerU 压缩包。
+
+    Args:
+        zip_path: 待解压的 zip 路径。
+        output_dir: 解压目标目录。
+    """
+    output_dir.mkdir(parents=True, exist_ok=True)
+    root = output_dir.resolve()
+    with zipfile.ZipFile(zip_path) as archive:
+        for member in archive.infolist():
+            target = (output_dir / member.filename).resolve()
+            try:
+                target.relative_to(root)
+            except ValueError as exc:
+                raise RuntimeError(f"压缩包包含不安全路径: {member.filename}") from exc
+            if member.is_dir():
+                target.mkdir(parents=True, exist_ok=True)
+                continue
+            target.parent.mkdir(parents=True, exist_ok=True)
+            with archive.open(member) as source, target.open("wb") as destination:
+                shutil.copyfileobj(source, destination)
+
+
+def _read_json(path: Path) -> object:
+    """读取 JSON 文件；格式异常时返回包含原始文本的对象。"""
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return {"path": str(path), "text": path.read_text(encoding="utf-8")}
+
+
+def _copy_image_dirs(extract_dir: Path, output_dir: Path) -> Path | None:
+    """汇总 MinerU 图片目录；返回目标目录或 ``None``。"""
+    image_dirs = sorted(
+        path
+        for path in extract_dir.rglob("images")
+        if path.is_dir()
+        and not any(
+            parent.name == "images" for parent in path.relative_to(extract_dir).parents
+        )
+    )
+    if not image_dirs:
+        return None
+    target_dir = output_dir / "images"
+    for image_dir in image_dirs:
+        shutil.copytree(image_dir, target_dir, dirs_exist_ok=True)
+    return target_dir
+
+
+def materialize_output(
+    zip_path: Path, output_path: Path, output_format: str
+) -> list[Path]:
+    """将 MinerU 压缩包整理为目标输出格式。
+
+    Args:
+        zip_path: MinerU 下载的结果压缩包。
+        output_path: 最终输出文件路径。
+        output_format: 输出格式，仅支持 ``md``、``json`` 或 ``zip``。
+
+    Returns:
+        实际生成的文件和目录列表。
+    """
+    if output_format == "zip":
+        return [zip_path]
+    extract_dir = output_path.parent / f"{output_path.stem}_mineru"
+    _safe_extract_zip(zip_path, extract_dir)
+
+    if output_format == "md":
+        markdown_files = sorted(extract_dir.rglob("*.md"))
+        if not markdown_files:
+            raise RuntimeError(f"MinerU 结果中没有找到 Markdown 文件: {extract_dir}")
+        parts = [
+            f"<!-- {path.relative_to(extract_dir)} -->\n\n"
+            f"{path.read_text(encoding='utf-8').rstrip()}"
+            for path in markdown_files
+        ]
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text("\n\n".join(parts).rstrip() + "\n", encoding="utf-8")
+        written = [output_path]
+        image_dir = _copy_image_dirs(extract_dir, output_path.parent)
+        if image_dir is not None:
+            written.append(image_dir)
+        return [*written, extract_dir]
+
+    if output_format == "json":
+        json_files = sorted(extract_dir.rglob("*.json"))
+        if not json_files:
+            raise RuntimeError(f"MinerU 结果中没有找到 JSON 文件: {extract_dir}")
+        payload = {
+            "source_zip": str(zip_path),
+            "extract_dir": str(extract_dir),
+            "files": [
+                {
+                    "path": str(path.relative_to(extract_dir)),
+                    "content": _read_json(path),
+                }
+                for path in json_files
+            ],
+        }
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+            newline="\n",
+        )
+        return [output_path, extract_dir]
+    raise ValueError(f"MinerU 输出格式仅支持 md/json/zip，不支持: {output_format}")
+
+
 def parse_args() -> argparse.Namespace:
+    """解析 MinerU 独立脚本参数；无输入，返回参数命名空间。"""
     parser = argparse.ArgumentParser(
         description="上传本地文件到 MinerU，轮询解析状态，并在完成后自动下载结果 zip。"
     )
@@ -326,6 +473,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> int:
+    """执行 MinerU 独立 CLI；无输入，返回进程退出码。"""
     args = parse_args()
 
     token = args.token or os.getenv("MINERU_TOKEN")
